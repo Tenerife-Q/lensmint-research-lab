@@ -7,124 +7,124 @@ from io import BytesIO
 from tqdm import tqdm
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
     import imagehash
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import roc_curve, auc
+    import numpy as np
 except ImportError:
-    print("Error: Required packages missing. Run: pip install Pillow imagehash requests tqdm")
+    print("Error: Run 'pip3 install Pillow imagehash requests tqdm matplotlib scikit-learn'")
     sys.exit(1)
 
-# 配置参数
 NUM_IMAGES = 100
 RAW_DIR = "data/raw"
 COMP_DIR = "data/compressed"
+TAMPER_DIR = "data/tampered"
 RESULTS_FILE = "results/benchmark_report.md"
+ROC_FILE = "results/roc_curve.png"
 
-os.makedirs(RAW_DIR, exist_ok=True)
-os.makedirs(COMP_DIR, exist_ok=True)
-
-def calculate_sha256(filepath):
-    with open(filepath, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+for d in [RAW_DIR, COMP_DIR, TAMPER_DIR, "results"]:
+    os.makedirs(d, exist_ok=True)
 
 def download_sample_images(count=NUM_IMAGES):
-    print(f"[*] Downloading {count} random high-res images for benchmark...")
+    print(f"[*] Checking dataset ({count} images)...")
     for i in tqdm(range(count), desc="Downloading"):
         img_path = os.path.join(RAW_DIR, f"img_{i:03d}.jpg")
-        if os.path.exists(img_path):
-            continue
-        # 使用 Lorem Picsum 获取真实的摄影图片
-        url = "https://picsum.photos/800/600"
-        try:
-            response = requests.get(url, timeout=10)
-            img = Image.open(BytesIO(response.content))
-            img.convert('RGB').save(img_path, "JPEG", quality=100)
-        except Exception as e:
-            print(f"Failed to download image {i}: {e}")
+        if not os.path.exists(img_path):
+            try:
+                response = requests.get("https://picsum.photos/800/600", timeout=10)
+                Image.open(BytesIO(response.content)).convert('RGB').save(img_path, "JPEG", quality=100)
+            except:
+                pass
+
+def simulate_tampering(img):
+    """模拟恶意篡改：在图片中央添加一个黑块（模拟抹除关键物体/打水印）"""
+    tampered = img.copy()
+    draw = ImageDraw.Draw(tampered)
+    w, h = tampered.size
+    box_size = int(w * 0.15) # 15% 的面积被篡改
+    draw.rectangle([w//2 - box_size, h//2 - box_size, w//2 + box_size, h//2 + box_size], fill="black")
+    return tampered
 
 def run_benchmark():
     download_sample_images()
     
-    # 定义要模拟的网络噪声类型
     noises = {
         "Gateway 95% JPEG": {"quality": 95, "resize": 1.0},
         "Gateway 85% JPEG": {"quality": 85, "resize": 1.0},
         "Aggressive 70% JPEG": {"quality": 70, "resize": 1.0},
-        "Resized (80% scale)": {"quality": 90, "resize": 0.8},
     }
 
-    results = {noise: {"sha_fail": 0, "phash_dist": []} for noise in noises}
-
-    print("\n[*] Running Hashing Resilience Benchmark on 100 images...")
+    # 用于绘制 ROC 的数据
+    y_true =[]      # 1 代表良性操作（应通过），0 代表恶意篡改（应拒绝）
+    distances =[]   # 记录对应的 Hamming Distance
+    
+    print("\n[*] Running Hashing Resilience & Tampering Benchmark...")
     
     for i in tqdm(range(NUM_IMAGES), desc="Benchmarking"):
         raw_path = os.path.join(RAW_DIR, f"img_{i:03d}.jpg")
-        if not os.path.exists(raw_path):
-            continue
+        if not os.path.exists(raw_path): continue
             
         orig_img = Image.open(raw_path)
-        orig_sha256 = calculate_sha256(raw_path)
         orig_phash = imagehash.phash(orig_img)
 
+        # 1. 模拟良性网络噪声
         for noise_name, params in noises.items():
             comp_path = os.path.join(COMP_DIR, f"img_{i:03d}_{noise_name.replace(' ', '_')}.jpg")
-            
-            # 施加网络噪声
-            processed_img = orig_img.copy()
-            if params["resize"] != 1.0:
-                new_size = (int(orig_img.width * params["resize"]), int(orig_img.height * params["resize"]))
-                processed_img = processed_img.resize(new_size, Image.Resampling.LANCZOS)
-            
-            processed_img.save(comp_path, "JPEG", quality=params["quality"])
-            
-            # 计算新的 Hash
-            new_sha256 = calculate_sha256(comp_path)
+            orig_img.copy().save(comp_path, "JPEG", quality=params["quality"])
             new_phash = imagehash.phash(Image.open(comp_path))
             
-            # 记录数据
-            if orig_sha256 != new_sha256:
-                results[noise_name]["sha_fail"] += 1
+            y_true.append(1)
+            distances.append(orig_phash - new_phash)
             
-            distance = orig_phash - new_phash
-            results[noise_name]["phash_dist"].append(distance)
-
-    # 生成 Markdown 报告
-    generate_report(results)
-
-def generate_report(results):
-    report =[
-        "# LensMint Authenticity Hash Resilience Benchmark",
-        "**Date**: " + time.strftime("%Y-%m-%d"),
-        "**Dataset**: 100 random real-world photography images (800x600)",
-        "\n## Context",
-        "This benchmark simulates how decentralized storage gateways (e.g., IPFS/Filecoin) process images. It proves that strict SHA-256 verification is completely unviable for Web3 hardware cameras, while **pHash maintains mathematical stability suitable for ZK verification**.",
-        "\n## Benchmark Results\n",
-        "| Network Noise Simulation | SHA-256 Failure Rate | pHash Avg Hamming Distance | pHash Max Distance | pHash Match (Threshold <= 5) |",
-        "|--------------------------|----------------------|----------------------------|--------------------|-----------------------------|"
-    ]
-
-    for noise, data in results.items():
-        sha_fail_rate = (data["sha_fail"] / NUM_IMAGES) * 100
-        dists = data["phash_dist"]
-        avg_dist = sum(dists) / len(dists) if dists else 0
-        max_dist = max(dists) if dists else 0
-        match_rate = sum(1 for d in dists if d <= 5) / len(dists) * 100
+        # 2. 模拟恶意篡改 (Deepfake/Photoshop 涂抹)
+        tamper_path = os.path.join(TAMPER_DIR, f"img_{i:03d}_tampered.jpg")
+        tampered_img = simulate_tampering(orig_img)
+        tampered_img.save(tamper_path, "JPEG", quality=95)
+        tampered_phash = imagehash.phash(Image.open(tamper_path))
         
-        row = f"| {noise} | **{sha_fail_rate:.1f}%** (Avalanche) | {avg_dist:.2f} | {max_dist} | **{match_rate:.1f}%** |"
-        report.append(row)
+        y_true.append(0)
+        distances.append(orig_phash - tampered_phash)
 
-    report.append("\n## Conclusion")
-    report.append("- **SHA-256 is entirely shattered** by even a visually lossless 95% JPEG re-encode (100% failure rate).")
-    report.append("- **pHash provides robust provenance**. Setting the ZK configurable threshold to `5` safely absorbs standard decentralized storage noise.")
+    # 绘制 ROC 和分布图
+    plot_roc_and_distribution(y_true, distances)
 
-    report_text = "\n".join(report)
+def plot_roc_and_distribution(y_true, distances):
+    # 将距离转换为“相似度得分”用于画 ROC，距离越小，得分越高 (64 - distance)
+    scores = [64 - d for d in distances]
+    fpr, tpr, thresholds = roc_curve(y_true, scores)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(12, 5))
+
+    # 子图1：ROC 曲线
+    plt.subplot(1, 2, 1)
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate (Accepted Tampered)')
+    plt.ylabel('True Positive Rate (Accepted Benign)')
+    plt.title('Receiver Operating Characteristic')
+    plt.legend(loc="lower right")
+
+    # 子图2：良性 vs 恶意 距离分布直方图
+    plt.subplot(1, 2, 2)
+    benign_dists =[d for y, d in zip(y_true, distances) if y == 1]
+    tamper_dists =[d for y, d in zip(y_true, distances) if y == 0]
     
-    with open(RESULTS_FILE, "w") as f:
-        f.write(report_text)
-        
-    print("\n" + "="*70)
-    print(" Benchmark Complete! Report generated at: " + RESULTS_FILE)
-    print("="*70)
-    print(report_text)
+    plt.hist(benign_dists, bins=range(0, 25), alpha=0.7, label='Benign Compression', color='green')
+    plt.hist(tamper_dists, bins=range(0, 25), alpha=0.7, label='Malicious Tampering', color='red')
+    plt.axvline(x=5, color='blue', linestyle='dashed', linewidth=2, label='Proposed ZK Threshold (5)')
+    
+    plt.xlabel('Hamming Distance')
+    plt.ylabel('Frequency')
+    plt.title('Hamming Distance Distribution')
+    plt.legend(loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig(ROC_FILE)
+    print(f"\n[*] Visual plots saved to: {ROC_FILE}")
 
 if __name__ == "__main__":
     run_benchmark()
