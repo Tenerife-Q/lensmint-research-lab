@@ -1,0 +1,8 @@
+[package]
+name = "rust-phash-validator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = "0.24.7"
+image_hasher = "1.2.0"
