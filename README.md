@@ -38,3 +38,9 @@ It strictly verifies that the ZK host and pHash extractor compile successfully t
 
 ## 4. Cross-Language Validation (Zero-Regression)
 Added a `rust-phash-validator` module to ensure that the production Rust daemon extracts the exact same `pHash` binary signature as the Python research benchmark. This guarantees algorithmic consistency across the entire Web3 pipeline.
+
+---
+
+## 5. Future Roadmap: Edge Security & Anti-Cloning
+While the PoC proves the functional viability, securing a physical IoT device requires strict IPC and hardware-bound encryption. Read the technical roadmap here:
+ **[SECURITY_RFC.md: Productionizing the Daemon](./SECURITY_RFC.md)**
